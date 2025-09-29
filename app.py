@@ -44,6 +44,6 @@ def predict(req: PredictRequest):
 
     try:
         preds = model.predict(X_df)    # now pipeline will apply OneHotEncoder etc.
-        return {"success": True, "predicted_price": float(preds[0])}
+        return {"success": True, "predicted_price1": float(preds[0])}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
