@@ -1,23 +1,23 @@
-name: CI/CD — Build & Deploy to ECR → ECS (immutable)
+name: CI/CD — Deploy ML API to ECS
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main   # adjust if your repo uses a different branch
 
 env:
-  ECR_REPOSITORY: restraunt-price-model   # your ECR repo name
-  TASK_FAMILY: rest-task-def                 # ECS task definition family (task family name)
-  CONTAINER_NAME: rest-model              # container name inside the task definition
+  ECR_REPOSITORY: restraunt-price-model    # your ECR repo name
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v3
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -25,61 +25,18 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
-        id: build-image
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-
-      - name: Set IMAGE_URI
-        run: echo "IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_ENV
-
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Fetch current task definition
-        id: fetch-task
+      - name: Build, tag, and push Docker image
         run: |
-          aws ecs describe-task-definition \
-            --task-definition "${{ env.TASK_FAMILY }}" \
-            --query "taskDefinition" > taskdef.json
-          echo "taskdef saved (size: $(wc -c taskdef.json))"
-          jq '.containerDefinitions[].name' taskdef.json || true
+          IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          echo "Building and pushing $IMAGE_URI"
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
 
-      - name: Prepare new task definition JSON
+      - name: Force new ECS deployment
         run: |
-          # Remove fields not allowed when registering a new task definition
-          jq "del(.status, .taskDefinitionArn, .revision, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)" taskdef.json > taskdef_clean.json
-
-          # Replace the container image for the named container with the new image (IMAGE_URI)
-          jq --arg img "$IMAGE_URI" --arg name "${{ env.CONTAINER_NAME }}" \
-            '.containerDefinitions |= map(if .name == $name then .image = $img else . end)' taskdef_clean.json > taskdef_for_register.json
-
-          # Ensure family is set (safe)
-          jq '.family = "'"${{ env.TASK_FAMILY }}"'" taskdef_for_register.json > taskdef_final.json
-
-          echo "---- taskdef_final.json ----"
-          jq '.' taskdef_final.json
-
-      - name: Register new task definition
-        id: register
-        run: |
-          aws ecs register-task-definition --cli-input-json file://taskdef_final.json > register_out.json
-          jq '.taskDefinition.taskDefinitionArn' register_out.json
-
-      - name: Update ECS service to use the new task definition
-        run: |
-          NEW_TASK_DEF_ARN=$(jq -r '.taskDefinition.taskDefinitionArn' register_out.json)
-          echo "Updating ECS service ${ECS_SERVICE} in cluster ${ECS_CLUSTER} to $NEW_TASK_DEF_ARN"
           aws ecs update-service \
             --cluster "${{ secrets.ECS_CLUSTER }}" \
             --service "${{ secrets.ECS_SERVICE }}" \
-            --task-definition "$NEW_TASK_DEF_ARN" \
             --force-new-deployment
-
